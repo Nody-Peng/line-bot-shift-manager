@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>找代班 - 快速申請</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Noto+Sans+TC', sans-serif; background-color: #f8fafc; }
+        .glass { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(10px); }
+        .btn-gradient { background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%); transition: all 0.3s ease; }
+        .btn-gradient:active { transform: scale(0.98); }
+    </style>
+</head>
+<body class="p-4 flex flex-col items-center justify-center min-h-screen">
+    <div class="w-full max-w-md glass p-8 rounded-3xl shadow-2xl border border-white">
+        <header class="mb-8 text-center">
+            <h1 class="text-3xl font-extrabold text-slate-800 mb-2">🆘 找代班</h1>
+            <p class="text-slate-500 text-sm">請填寫代班資訊，系統將自動為您發布通知</p>
+        </header>
+
+        <form id="subForm" class="space-y-6">
+            <!-- 日期選擇 -->
+            <div>
+                <label class="block text-sm font-bold text-slate-700 mb-2">📅 請假日期</label>
+                <input type="date" id="date" required 
+                       class="w-full px-4 py-3 rounded-xl border-2 border-slate-100 focus:border-orange-400 focus:outline-none transition-colors">
+            </div>
+
+            <!-- 時段選擇 -->
+            <div>
+                <label class="block text-sm font-bold text-slate-700 mb-2">⏰ 時段</label>
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="relative">
+                        <input type="radio" name="time_slot" value="9~12" class="peer hidden" required>
+                        <div class="cursor-pointer text-center py-3 rounded-xl border-2 border-slate-100 peer-checked:border-orange-400 peer-checked:bg-orange-50 peer-checked:text-orange-600 transition-all font-medium text-slate-600">9~12</div>
+                    </label>
+                    <label class="relative">
+                        <input type="radio" name="time_slot" value="12~14" class="peer hidden">
+                        <div class="cursor-pointer text-center py-3 rounded-xl border-2 border-slate-100 peer-checked:border-orange-400 peer-checked:bg-orange-50 peer-checked:text-orange-600 transition-all font-medium text-slate-600">12~14</div>
+                    </label>
+                    <label class="relative">
+                        <input type="radio" name="time_slot" value="14~16" class="peer hidden">
+                        <div class="cursor-pointer text-center py-3 rounded-xl border-2 border-slate-100 peer-checked:border-orange-400 peer-checked:bg-orange-50 peer-checked:text-orange-600 transition-all font-medium text-slate-600">14~16</div>
+                    </label>
+                    <label class="relative">
+                        <input type="radio" name="time_slot" value="16~18" class="peer hidden">
+                        <div class="cursor-pointer text-center py-3 rounded-xl border-2 border-slate-100 peer-checked:border-orange-400 peer-checked:bg-orange-50 peer-checked:text-orange-600 transition-all font-medium text-slate-600">16~18</div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- 理由 -->
+            <div>
+                <label class="block text-sm font-bold text-slate-700 mb-2">📝 請假理由</label>
+                <textarea id="reason" rows="3" required placeholder="如：感冒發燒、家中有事..."
+                          class="w-full px-4 py-3 rounded-xl border-2 border-slate-100 focus:border-orange-400 focus:outline-none transition-colors"></textarea>
+            </div>
+
+            <button type="submit" 
+                    class="w-full py-4 rounded-2xl text-white font-bold text-lg btn-gradient shadow-lg">
+                確認發布
+            </button>
+        </form>
+    </div>
+
+    <script>
+        async function initLIFF() {
+            try {
+                // 使用從後端傳入的動態 LIFF ID
+                await liff.init({ liffId: "{{ liff_id }}" });
+                if (!liff.isLoggedIn()) {
+                    liff.login();
+                }
+            } catch (err) {
+                console.error("LIFF Init failed", err);
+            }
+        }
+
+        document.getElementById('subForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const submitBtn = e.target.querySelector('button');
+            submitBtn.disabled = true;
+            submitBtn.textContent = '傳送中...';
+
+            try {
+                // 先獲取身分，這會觸發授權視窗（如果需要）
+                const profile = await liff.getProfile();
+                const userId = profile.userId;
+                const context = liff.getContext();
+                
+                const data = {
+                    date: document.getElementById('date').value,
+                    time_slot: document.querySelector('input[name="time_slot"]:checked').value,
+                    reason: document.getElementById('reason').value,
+                    userId: userId,
+                    groupId: context.groupId || context.roomId || null
+                };
+
+                const response = await fetch('/api/submit-sub', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                if (response.ok) {
+                    liff.closeWindow();
+                } else {
+                    const errData = await response.json();
+                    throw new Error(errData.message || '伺服器回傳錯誤');
+                }
+            } catch (err) {
+                alert("傳送失敗：" + err.message);
+                submitBtn.disabled = false;
+                submitBtn.textContent = '確認發布';
+            }
+        });
+
+        initLIFF();
+    </script>
+</body>
+</html>

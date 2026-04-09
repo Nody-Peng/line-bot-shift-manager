@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>班表管理系統 - 匯入 CSV</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Noto+Sans+TC', sans-serif; background-color: #f1f5f9; }
+        .sidebar { background: #1e293b; }
+    </style>
+</head>
+<body class="flex min-h-screen">
+    <!-- Sidebar -->
+    <aside class="w-64 sidebar text-slate-300 p-6 hidden md:block">
+        <div class="mb-10 text-white font-bold text-2xl flex items-center">
+            <span class="mr-2">📅</span> ShiftMaster
+        </div>
+        <nav class="space-y-4">
+            <a href="#" class="block py-2 px-4 bg-slate-700 text-white rounded-lg">匯入學期班表</a>
+            <a href="/" class="block py-2 px-4 hover:bg-slate-800 rounded-lg">回到首頁</a>
+        </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 p-8">
+        <header class="flex justify-between items-center mb-10">
+            <h1 class="text-3xl font-bold text-slate-800">學期班表匯入</h1>
+            <div class="bg-white px-4 py-2 rounded-lg shadow-sm text-sm text-slate-500">
+                目前狀態：<span class="text-green-500 font-bold">系統運作中</span>
+            </div>
+        </header>
+
+        <section class="max-w-4xl mx-auto">
+            <!-- 指南 -->
+            <div class="bg-blue-50 border-l-4 border-blue-500 p-6 rounded-r-xl mb-8">
+                <h2 class="text-blue-800 font-bold mb-2">如何匯入班表？</h2>
+                <ol class="list-decimal list-inside text-blue-700 space-y-1 text-sm">
+                    <li>下載並參考 <a href="/template.csv" class="underline font-bold">CSV 範本</a>。</li>
+                    <li>準備好您的學期班表，格式需為：`星期,時段,姓名`。</li>
+                    <li>上傳後，系統會自動更新資料庫，舊的每週排班將被覆蓋。</li>
+                </ol>
+            </div>
+
+            <!-- 上傳區 -->
+            <div class="bg-white rounded-3xl shadow-xl overflow-hidden">
+                <div class="p-10">
+                    <form action="/upload-csv" method="post" enctype="multipart/form-data">
+                        <div class="border-2 border-dashed border-slate-200 rounded-2xl p-12 text-center hover:border-blue-400 transition-colors cursor-pointer group">
+                            <input type="file" name="file" id="fileInput" class="hidden" accept=".csv" required>
+                            <label for="fileInput" class="cursor-pointer">
+                                <div class="text-5xl mb-4 group-hover:scale-110 transition-transform">📂</div>
+                                <div class="text-slate-800 font-bold text-xl mb-2">上傳 CSV 班表檔案</div>
+                                <div class="text-slate-400 text-sm">點擊或拖曳檔案至此處</div>
+                            </label>
+                        </div>
+                        
+                        <div id="fileInfo" class="mt-4 text-center text-sm text-slate-500 hidden">
+                            已選取檔案：<span id="fileName" class="font-bold text-slate-800"></span>
+                        </div>
+
+                        <button type="submit" class="w-full mt-10 py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-lg shadow-lg shadow-blue-200 transition-all">
+                            立即匯入並更新
+                        </button>
+                    </form>
+                </div>
+            </div>
+            
+            <p class="mt-6 text-center text-slate-400 text-xs">
+                &copy; 2026 ShiftMaster 系辦代班管理工具 | 非開發人員請勿隨意操作
+            </p>
+        </section>
+    </main>
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+
+        fileInput.onchange = () => {
+            if (fileInput.files.length > 0) {
+                fileInfo.classList.remove('hidden');
+                fileName.textContent = fileInput.files[0].name;
+            }
+        };
+    </script>
+</body>
+</html>

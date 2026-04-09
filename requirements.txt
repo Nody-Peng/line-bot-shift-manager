@@ -1,6 +1,8 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-line-bot-sdk==3.5.0
-python-dotenv==1.0.0
-sqlalchemy==2.0.23
-apscheduler==3.10.4
+fastapi
+uvicorn
+line-bot-sdk
+python-dotenv
+sqlalchemy
+apscheduler
+jinja2
+python-multipart
