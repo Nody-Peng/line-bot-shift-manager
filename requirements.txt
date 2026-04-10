@@ -2,7 +2,8 @@ fastapi
 uvicorn
 line-bot-sdk
 python-dotenv
-sqlalchemy
+gspread
+google-auth
 apscheduler
 jinja2
 python-multipart

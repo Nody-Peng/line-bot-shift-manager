@@ -6,3 +6,6 @@ venv/
 __pycache__/
 *.pyc
 *.db
+
+shift-helper-drive.json
+shift-helper-sheet.json
