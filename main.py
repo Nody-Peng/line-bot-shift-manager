@@ -156,7 +156,7 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     background_tasks.add_task(handler.handle, body_str, signature)
-    return 'OK'
+    return Response(content='OK', status_code=200, media_type='text/plain')
 
 
 # ─────────────────────────────────────────────
