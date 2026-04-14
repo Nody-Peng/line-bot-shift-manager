@@ -347,15 +347,20 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
-        # ── 2. 幫助訊息 (不受限制) ──────────────────────
-        elif msg in ["說明書", "幫助", "指令", "使用說明", "help", "Help", "?"]:
+        # ── 2. 指令面板/幫助訊息 (不受限制) ──────────
+        elif msg in ["主選單", "菜單", "menu", "Menu"]:
+            flex = create_main_menu_flex()
+            line_bot_api.reply_message(event.reply_token, flex)
+            return
+
+        elif msg in ["說明書", "幫助", "指令", "使用說明", "help", "Help", "?", "？"]:
             flex = create_help_flex()
             line_bot_api.reply_message(event.reply_token, flex)
             return
 
         # ── 3. 權限檢查 (其餘指令需先綁定) ────────────────
         # 定義需要權限的指令
-        authorized_commands = ["找代班", "查班表", "查詢", "查代班", "接代班", "我是誰"]
+        authorized_commands = ["找代班", "查班表", "查詢", "查代班", "接代班", "市場", "我是誰"]
         is_cmd = any(msg.startswith(c) for c in authorized_commands)
 
         if is_cmd and not user:
@@ -480,7 +485,7 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, flex)
 
         # ── 4. 代班大廳 (接代班) ───────────────────────
-        elif msg in ["查代班", "接代班"]:
+        elif msg in ["查代班", "接代班", "市場"]:
             active_reqs = sheets.get_all_active_sub_requests()
             if not active_reqs:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="系統提示：目前沒有待接手的代班需求。"))
@@ -491,10 +496,7 @@ def handle_message(event):
             flex = create_market_carousel(active_reqs)
             line_bot_api.reply_message(event.reply_token, flex)
 
-        # ── 5. 主選單 ────────────────────────────────
-        elif msg == "主選單":
-            flex = create_main_menu_flex()
-            line_bot_api.reply_message(event.reply_token, flex)
+
 
         # ── 6. 查詢群組 ID (方便設定通知) ──────────────
         elif msg == "群組ID":
@@ -545,39 +547,39 @@ def create_help_flex() -> FlexSendMessage:
                         "type": "box", "layout": "vertical",
                         "contents": [
                             {"type": "text", "text": "1. 帳號綁定", "weight": "bold", "size": "md", "color": "#475569"},
-                            {"type": "text", "text": "使用系統前必做！輸入「綁定 您的姓名」來連結身分。\n範例：綁定 王小明\n(也可輸入「我是誰」確認目前綁定的身分)", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
+                            {"type": "text", "text": "關鍵字：綁定+空格+姓名、我是誰\n• 範例：綁定 王小明\n• 功能：初次使用必做，連結後才能執行代班操作。", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
                         ]
                     },
                     {"type": "separator", "margin": "md"},
                     {
                         "type": "box", "layout": "vertical", "margin": "md",
                         "contents": [
-                            {"type": "text", "text": "2. 查班表", "weight": "bold", "size": "md", "color": "#475569"},
-                            {"type": "text", "text": "輸入「查詢」或「查班表」來查看當天或特定日期的排班狀況與代班異動。\n也可直接輸入：\n• 查詢 今天 / 明天\n• 查詢 星期三\n• 查詢 2026-04-10", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
+                            {"type": "text", "text": "2. 查班表與排班", "weight": "bold", "size": "md", "color": "#475569"},
+                            {"type": "text", "text": "關鍵字：查詢、查班表\n• 進階用法：查詢 [今天/明天/星期幾/日期]\n• 範例：查詢 星期五、查詢 2024-05-01", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
                         ]
                     },
                     {"type": "separator", "margin": "md"},
                     {
                         "type": "box", "layout": "vertical", "margin": "md",
                         "contents": [
-                            {"type": "text", "text": "3. 找代班", "weight": "bold", "size": "md", "color": "#475569"},
-                            {"type": "text", "text": "輸入「找代班」開啟申請表單。\n表單內可一次勾選當天請假的多個時段，發送需求供他人接手。", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
+                            {"type": "text", "text": "3. 找代班 (送出請求)", "weight": "bold", "size": "md", "color": "#475569"},
+                            {"type": "text", "text": "關鍵字：找代班\n• 功能：填寫請假日期與時段，送出後系統會推播通知至指定的成員與群組。", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
                         ]
                     },
                     {"type": "separator", "margin": "md"},
                     {
                         "type": "box", "layout": "vertical", "margin": "md",
                         "contents": [
-                            {"type": "text", "text": "4. 接代班", "weight": "bold", "size": "md", "color": "#475569"},
-                            {"type": "text", "text": "輸入「接代班」查看目前所有待接手的代班需求，點擊「接手」就可以幫忙代班！", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
+                            {"type": "text", "text": "4. 接代班與市場", "weight": "bold", "size": "md", "color": "#475569"},
+                            {"type": "text", "text": "關鍵字：接代班、查代班、市場\n• 功能：查看目前所有開放中的代班需求，點擊卡片「確認接手」即可完成媒合。", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
                         ]
                     },
                     {"type": "separator", "margin": "md"},
                     {
                         "type": "box", "layout": "vertical", "margin": "md",
                         "contents": [
-                            {"type": "text", "text": "5. 主選單", "weight": "bold", "size": "md", "color": "#475569"},
-                            {"type": "text", "text": "輸入「主選單」隨時喚出功能按鈕面板，不用自己打字！", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
+                            {"type": "text", "text": "5. 功能選單與說明", "weight": "bold", "size": "md", "color": "#475569"},
+                            {"type": "text", "text": "關鍵字：主選單、說明書、幫助、?\n• 功能：呼叫快速按鈕面板或此份使用指南。", "size": "sm", "color": "#64748B", "wrap": True, "margin": "sm"}
                         ]
                     }
                 ]
