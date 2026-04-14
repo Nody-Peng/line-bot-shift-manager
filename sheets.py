@@ -72,6 +72,14 @@ def get_user(line_id: str) -> dict | None:
             return r
     return None
 
+def get_user_id_by_name(name: str) -> str | None:
+    records = _get_records_cached("users", ttl=30)
+    for r in records:
+        if str(r.get("name", "")).strip() == name.strip():
+            user_id = str(r.get("line_user_id", "")).strip()
+            return user_id if user_id else None
+    return None
+
 def get_all_bound_users() -> list[dict]:
     """回傳所有已綁定 LINE ID 的使用者清單。"""
     records = _get_records_cached("users", ttl=30)
@@ -92,19 +100,36 @@ def bind_whitelist_user(line_id: str, name: str) -> str:
     _ensure_headers(sh, USERS_HEADERS)
     records = sh.get_all_records()
     
+    target_row = None
+    status = "not_in_whitelist"
+    
+    # 步驟 1：檢測目標名字是否可綁定
     for i, r in enumerate(records, start=2):
         if str(r.get("name", "")).strip() == name.strip():
             current_id = str(r.get("line_user_id", "")).strip()
             if not current_id:
-                sh.update_cell(i, 1, line_id)
-                invalidate_cache("users")
-                return "success"
+                target_row = i
+                status = "success"
+                break
             elif current_id == line_id:
-                return "already_bound_to_you"
+                target_row = i
+                status = "already_bound_to_you"
+                break
             else:
                 return "bound_to_other"
                 
-    return "not_in_whitelist"
+    # 步驟 2：若可綁定，則先清除其它該 LINE ID 的舊記錄，再執行新綁定
+    if status in ["success", "already_bound_to_you"]:
+        for i, r in enumerate(records, start=2):
+            if str(r.get("line_user_id", "")).strip() == line_id and i != target_row:
+                sh.update_cell(i, 1, "")
+                
+        if status == "success":
+            sh.update_cell(target_row, 1, line_id)
+            
+        invalidate_cache("users")
+        
+    return status
 
 # ─────────────────────────────────────────────
 # ❷  schedule_plans
@@ -307,6 +332,8 @@ def cancel_sub_request_by_id(req_id: int, user_name: str) -> str:
             if user_name == requester:
                 if status == "已結案":
                     return "already_matched"
+                if str(r.get("pending_taker", "")).strip():
+                    return "currently_locked"
                 sh.update_cell(i, 7, "已撤回")
                 invalidate_cache("sub_requests")
                 return "withdrawn_by_requester"

@@ -633,6 +633,12 @@ def handle_postback(event):
                     text="狀態通知：此代班請求已結束或已撤回。"))
                 return
 
+            # 不能接手自己的
+            if str(req.get("requester_name", "")).strip() == user_name:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="系統提示：您無法接手由自己發出的代班請求。"))
+                return
+
             # 嘗試取得鎖定（防止同時接手的競爭）
             lock_result = sheets.try_lock_sub_request(req_id, user_name)
             if lock_result == "locked_by_other":
@@ -674,9 +680,9 @@ def handle_postback(event):
 
             # 驗證鎖定是否仍屬於此用戶（防止搶鎖）
             pending = str(req.get("pending_taker", "")).strip()
-            if pending and not pending.startswith(user_name + "|"):
+            if not pending or not pending.startswith(user_name + "|"):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="處理失敗：已有其他人搶先確認接手，請重新嘗試。"))
+                    text="處理失敗：鎖定過期或已被取消，請重新點擊「接手」。"))
                 return
 
             # 不能接手自己的
@@ -715,9 +721,23 @@ def handle_postback(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="處理失敗：請稍後再試。"))
                 return
 
-            # 1. 回傳給接手者 (含5分鐘取消按鈕)
+            # 1. 處理回覆與推播邏輯 (避免在群組操作時重複發送)
             success_flex = create_matching_success_flex(req, user_name, role="taker")
-            line_bot_api.reply_message(event.reply_token, success_flex)
+            group_flex = create_match_group_notification_flex(req, user_name)
+            
+            if event.source.type == "group":
+                line_bot_api.reply_message(event.reply_token, group_flex)
+                try:
+                    line_bot_api.push_message(user_id, success_flex)
+                except Exception as e:
+                    print(f"Push to taker error: {e}")
+            else:
+                line_bot_api.reply_message(event.reply_token, success_flex)
+                if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
+                    try:
+                        line_bot_api.push_message(DEFAULT_GROUP_ID, group_flex)
+                    except Exception as e:
+                        print(f"Group notify error: {e}")
 
             # 2. 推播給申請人 (純通知，無按鈕)
             requester_id = sheets.get_user_id_by_name(str(req["requester_name"]))
@@ -727,14 +747,6 @@ def handle_postback(event):
                     line_bot_api.push_message(requester_id, req_success_flex)
                 except Exception as e:
                     print(f"Notify requester error: {e}")
-
-            # 3. 群組通知 (Flex 卡片，無按鈕)
-            if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
-                try:
-                    group_flex = create_match_group_notification_flex(req, user_name)
-                    line_bot_api.push_message(DEFAULT_GROUP_ID, group_flex)
-                except Exception as e:
-                    print(f"Group notify error: {e}")
 
         # ── 申請人撤回 (媒合前) ──
         elif action == "cancel_sub_req_start":
@@ -746,6 +758,10 @@ def handle_postback(event):
             if str(req.get("status", "")).strip() == "已結案":
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
                     text="撤回失敗：此請求已被接手，申請人無法再撤回。\n若希望取消代班，請通知接手人在 5 分鐘內自行取消接手。"))
+                return
+            if str(req.get("pending_taker", "")).strip():
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="撤回失敗：目前正有人在確認接手此班次，請稍後再試。\n若對方接手成功，則無法撤回。"))
                 return
             confirm_flex = create_cancellation_confirm_flex(req_id)
             line_bot_api.reply_message(event.reply_token, confirm_flex)
@@ -760,10 +776,22 @@ def handle_postback(event):
             res = sheets.cancel_sub_request_by_id(req_id, user_name)
 
             if res == "withdrawn_by_requester":
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已成功撤回代班請求，該時段已移出代班市場。"))
+                group_msg = f"代班資訊更新：\n\n申請人 {user_name} 已撤回 {req['date']} ({req['time_slot']}) 的代班請求。\n該時段已不再需要代班。"
+                if event.source.type == "group":
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=group_msg))
+                else:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已成功撤回代班請求，該時段已移出代班市場。"))
+                    if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
+                        try:
+                            line_bot_api.push_message(DEFAULT_GROUP_ID, TextSendMessage(text=group_msg))
+                        except Exception as e:
+                            print(f"Group notify error: {e}")
             elif res == "already_matched":
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
                     text="撤回失敗：此請求已被他人接手。\n若希望取消代班，請通知接手人在 5 分鐘內自行取消接手。"))
+            elif res == "currently_locked":
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="撤回失敗：目前正有人在確認接手此班次，請稍後再試。\n若對方接手成功，則無法撤回。"))
             else:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="撤回失敗，請稍後再試。"))
 
@@ -796,8 +824,24 @@ def handle_postback(event):
                     print(f"matched_at parse error: {e}")
             res = sheets.cancel_sub_request_by_id(req_id, user_name)
             if res == "released_by_taker":
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="已成功取消接手，該時段已重新放回代班市場。"))
+                group_msg = f"代班資訊更新：\n\n{user_name} 已取消接手 {req['date']} ({req['time_slot']}) 原負責人 {req['requester_name']} 的代班。\n該時段已重新開放，有意願者可點擊原卡片重新接手。"
+                
+                # 處理回覆與推播邏輯
+                if event.source.type == "group":
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=group_msg))
+                    try:
+                        line_bot_api.push_message(user_id, TextSendMessage(text="已成功取消接手，該時段已重新放回代班市場。"))
+                    except Exception as e:
+                        pass
+                else:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已成功取消接手，該時段已重新放回代班市場。"))
+                    if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
+                        try:
+                            line_bot_api.push_message(DEFAULT_GROUP_ID, TextSendMessage(text=group_msg))
+                        except Exception as e:
+                            print(f"Group notify error: {e}")
+
+                # 通知原申請人
                 rid = sheets.get_user_id_by_name(str(req["requester_name"]))
                 if rid:
                     try:
@@ -811,9 +855,20 @@ def handle_postback(event):
         elif action == "cancel_lock":
             # 使用者在第一步確認彈窗取消 → 釋放鎖定
             req_id = int(data_dict.get("request_id", 0))
-            if req_id:
-                sheets.release_lock(req_id)
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已取消操作，鎖定已釋放。"))
+            user = sheets.get_user(user_id)
+            if not user: return
+            user_name = str(user["name"]).strip()
+            req = sheets.get_sub_request_by_id(req_id)
+            if req:
+                pending = str(req.get("pending_taker", "")).strip()
+                if pending.startswith(user_name + "|"):
+                    if req_id:
+                        sheets.release_lock(req_id)
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已取消接手確認，班次重新開放。"))
+                else:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="操作無效：此班次目前並非由您鎖定。"))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到該請求。"))
 
         elif action == "cancel_sub_op":
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已取消操作。"))
@@ -838,12 +893,6 @@ def create_sos_card(req: dict, name: str, show_cancel: bool = False) -> FlexSend
             "type": "button", "style": "primary", "color": "#64748B", "height": "sm",
             "action": {"type": "postback", "label": "確認接手", "data": f"action=accept_sub&request_id={req['id']}"}
         })
-    
-    # 無論是否為申請人，都增加一個分享按鈕（作為 shareTargetPicker 失效時的備案）
-    footer_contents.append({
-        "type": "button", "style": "link", "color": "#94A3B8", "height": "sm", "margin": "sm",
-        "action": {"type": "uri", "label": "分享至群組", "uri": f"https://liff.line.me/{LIFF_ID}?action=share&request_id={req['id']}"}
-    })
 
     return FlexSendMessage(
         alt_text="代班請求",
