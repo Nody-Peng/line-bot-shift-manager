@@ -68,10 +68,18 @@ def get_user(line_id: str) -> dict | None:
     records = _get_records_cached("users", ttl=30)
     for r in records:
         if str(r.get("line_user_id", "")).strip() == line_id.strip():
-            # 回傳前先把名字也去空白
             r["name"] = str(r.get("name", "")).strip()
             return r
     return None
+
+def get_all_bound_users() -> list[dict]:
+    """回傳所有已綁定 LINE ID 的使用者清單。"""
+    records = _get_records_cached("users", ttl=30)
+    return [
+        {"line_user_id": str(r["line_user_id"]).strip(), "name": str(r["name"]).strip()}
+        for r in records
+        if str(r.get("line_user_id", "")).strip() and str(r.get("name", "")).strip()
+    ]
 
 def bind_whitelist_user(line_id: str, name: str) -> str:
     """
@@ -153,7 +161,7 @@ def add_slots_batch(plan_id: int, rows: list[tuple]):
 # ─────────────────────────────────────────────
 # ❹  sub_requests
 # ─────────────────────────────────────────────
-SUBS_HEADERS = ["id", "date", "time_slot", "requester_name", "reason", "sub_user_name", "status"]
+SUBS_HEADERS = ["id", "date", "time_slot", "requester_name", "reason", "sub_user_name", "status", "matched_at", "pending_taker"]
 
 def get_sub_requests(date: str, time_slot: str) -> list[dict]:
     records = _get_records_cached("sub_requests", ttl=5)
@@ -193,33 +201,98 @@ def add_sub_request(date: str, time_slot: str, requester_name: str, reason: str)
     ids = [int(r["id"]) for r in records if str(r.get("id", "")).isdigit()]
     new_id = max(ids) + 1 if ids else 1
     
-    sh.append_row([new_id, date, time_slot, requester_name, reason, "", "尋找中"])
+    sh.append_row([new_id, date, time_slot, requester_name, reason, "", "尋找中", "", ""])
     invalidate_cache("sub_requests")
     return {
         "id": new_id, "date": date, "time_slot": time_slot,
         "requester_name": requester_name, "reason": reason,
-        "sub_user_name": "", "status": "尋找中"
+        "sub_user_name": "", "status": "尋找中", "matched_at": "", "pending_taker": ""
     }
 
 def close_sub_request(req_id: int, sub_user_name: str) -> bool:
-    """將指定代班請求結案，填入代班人名。回傳是否成功。"""
+    """將指定代班請求結案，填入代班人名與媒合時間。回傳是否成功。"""
     sh = _get_sheet("sub_requests")
     _ensure_headers(sh, SUBS_HEADERS)
     records = sh.get_all_records()
+    
+    now_taipei = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
+    matched_at_str = now_taipei.isoformat()
+    
     for i, r in enumerate(records, start=2):
         if str(r.get("id", "")).strip() == str(req_id):
             sh.update_cell(i, 6, sub_user_name)
             sh.update_cell(i, 7, "已結案")
+            sh.update_cell(i, 8, matched_at_str)
+            sh.update_cell(i, 9, "")  # 清除鎖定
             invalidate_cache("sub_requests")
             return True
     return False
 
+def try_lock_sub_request(req_id: int, user_name: str) -> str:
+    """
+    嘗試鎖定代班請求，防止同時接手的競爭。
+    回傳: 'ok' (鎖定成功), 'already_locked_by_you', 'locked_by_other', 'not_available'
+    鎖定有效期為 120 秒，逾期則視為失效。
+    """
+    sh = _get_sheet("sub_requests")
+    _ensure_headers(sh, SUBS_HEADERS)
+    records = sh.get_all_records()
+    tz = pytz.timezone('Asia/Taipei')
+    now = datetime.datetime.now(tz)
+
+    for i, r in enumerate(records, start=2):
+        if str(r.get("id", "")).strip() == str(req_id):
+            status = str(r.get("status", "")).strip()
+            if status in ["已結案", "已撤回"]:
+                return "not_available"
+
+            pending = str(r.get("pending_taker", "")).strip()
+            if pending:
+                parts = pending.split("|", 1)
+                locked_user = parts[0]
+                # 如果是同一個人再次點擊
+                if locked_user == user_name:
+                    return "already_locked_by_you"
+                # 檢查鎖定是否過期 (120秒)
+                if len(parts) == 2:
+                    try:
+                        lock_time = datetime.datetime.fromisoformat(parts[1])
+                        if lock_time.tzinfo is None:
+                            lock_time = tz.localize(lock_time)
+                        elapsed = (now - lock_time).total_seconds()
+                        if elapsed < 120:
+                            return "locked_by_other"
+                        # 過期，允許覆寫
+                    except Exception:
+                        return "locked_by_other"
+                else:
+                    return "locked_by_other"
+
+            # 寫入鎖定
+            lock_value = f"{user_name}|{now.isoformat()}"
+            sh.update_cell(i, 9, lock_value)
+            invalidate_cache("sub_requests")
+            return "ok"
+
+    return "not_available"
+
+def release_lock(req_id: int):
+    """\u91cb\u653e\u4ee3\u73ed\u8acb\u6c42\u7684\u9396\u5b9a\u3002"""
+    sh = _get_sheet("sub_requests")
+    records = sh.get_all_records()
+    for i, r in enumerate(records, start=2):
+        if str(r.get("id", "")).strip() == str(req_id):
+            sh.update_cell(i, 9, "")
+            invalidate_cache("sub_requests")
+            return
+
 def cancel_sub_request_by_id(req_id: int, user_name: str) -> str:
     """
-    取消代班請求邏輯：
-    1. 若使用者是申請者：整筆請求設為 '已撤回'。
-    2. 若使用者是接手者：將狀態改回 '尋找中'，清空接手人。
-    回傳：'withdrawn_by_requester', 'released_by_taker', 'failed'
+    取消代班請求邏輯（新版）：
+    1. 若使用者是申請者 且 狀態為「尋找中」：整筆請求設為 '已撤回'。
+    2. 若使用者是申請者 且 狀態為「已結案」：回傳 'already_matched'（媒合後無法撤回）。
+    3. 若使用者是接手者：將狀態改回 '尋找中'，清空接手人與 matched_at。
+    回傳：'withdrawn_by_requester', 'already_matched', 'released_by_taker', 'failed'
     """
     sh = _get_sheet("sub_requests")
     _ensure_headers(sh, SUBS_HEADERS)
@@ -229,14 +302,19 @@ def cancel_sub_request_by_id(req_id: int, user_name: str) -> str:
         if str(r.get("id", "")).strip() == str(req_id):
             requester = str(r.get("requester_name", "")).strip()
             taker = str(r.get("sub_user_name", "")).strip()
+            status = str(r.get("status", "")).strip()
             
             if user_name == requester:
+                if status == "已結案":
+                    return "already_matched"
                 sh.update_cell(i, 7, "已撤回")
                 invalidate_cache("sub_requests")
                 return "withdrawn_by_requester"
             elif user_name == taker:
                 sh.update_cell(i, 6, "")
                 sh.update_cell(i, 7, "尋找中")
+                sh.update_cell(i, 8, "")  # 清空 matched_at
+                sh.update_cell(i, 9, "")  # 清空 pending_taker
                 invalidate_cache("sub_requests")
                 return "released_by_taker"
                 
