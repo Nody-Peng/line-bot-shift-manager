@@ -3,6 +3,7 @@ from google.oauth2.service_account import Credentials
 import os
 import datetime
 import time
+import pytz
 
 # Scopes
 SCOPES = [
@@ -72,19 +73,30 @@ def get_user(line_id: str) -> dict | None:
             return r
     return None
 
-def upsert_user(line_id: str, name: str) -> str:
-    """新增或更新使用者。回傳 'created' 或 'updated'。"""
+def bind_whitelist_user(line_id: str, name: str) -> str:
+    """
+    白名單綁定邏輯：
+    1. 姓名必須存在於表中。
+    2. 該姓名的 line_user_id 必須為空，或者已經等於當前的 line_id。
+    回傳：'success', 'already_bound_to_you', 'bound_to_other', 'not_in_whitelist'
+    """
     sh = _get_sheet("users")
     _ensure_headers(sh, USERS_HEADERS)
-    records = sh.get_all_records()  # Upsert 建議用最準確的資料，不使用快取
-    for i, r in enumerate(records, start=2):  # row 1 is header
-        if str(r.get("line_user_id", "")).strip() == line_id.strip():
-            sh.update_cell(i, 2, name)
-            invalidate_cache("users")
-            return "updated"
-    sh.append_row([line_id, name])
-    invalidate_cache("users")
-    return "created"
+    records = sh.get_all_records()
+    
+    for i, r in enumerate(records, start=2):
+        if str(r.get("name", "")).strip() == name.strip():
+            current_id = str(r.get("line_user_id", "")).strip()
+            if not current_id:
+                sh.update_cell(i, 1, line_id)
+                invalidate_cache("users")
+                return "success"
+            elif current_id == line_id:
+                return "already_bound_to_you"
+            else:
+                return "bound_to_other"
+                
+    return "not_in_whitelist"
 
 # ─────────────────────────────────────────────
 # ❷  schedule_plans
@@ -156,6 +168,16 @@ def get_all_sub_requests_for_date(date: str) -> list[dict]:
     records = _get_records_cached("sub_requests", ttl=5)
     return [r for r in records if str(r.get("date", "")).strip() == date]
 
+def get_all_active_sub_requests() -> list[dict]:
+    """獲取所有「待接手」以及「已媒合但尚未發生」的代班請求。"""
+    records = _get_records_cached("sub_requests", ttl=5)
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    return [
+        r for r in records 
+        if str(r.get("status")).strip() == "尋找中" or
+        (str(r.get("status")).strip() == "已結案" and str(r.get("date")) >= today)
+    ]
+
 def get_sub_request_by_id(req_id: int) -> dict | None:
     records = _get_records_cached("sub_requests", ttl=5)
     for r in records:
@@ -191,6 +213,34 @@ def close_sub_request(req_id: int, sub_user_name: str) -> bool:
             invalidate_cache("sub_requests")
             return True
     return False
+
+def cancel_sub_request_by_id(req_id: int, user_name: str) -> str:
+    """
+    取消代班請求邏輯：
+    1. 若使用者是申請者：整筆請求設為 '已撤回'。
+    2. 若使用者是接手者：將狀態改回 '尋找中'，清空接手人。
+    回傳：'withdrawn_by_requester', 'released_by_taker', 'failed'
+    """
+    sh = _get_sheet("sub_requests")
+    _ensure_headers(sh, SUBS_HEADERS)
+    records = sh.get_all_records()
+    
+    for i, r in enumerate(records, start=2):
+        if str(r.get("id", "")).strip() == str(req_id):
+            requester = str(r.get("requester_name", "")).strip()
+            taker = str(r.get("sub_user_name", "")).strip()
+            
+            if user_name == requester:
+                sh.update_cell(i, 7, "已撤回")
+                invalidate_cache("sub_requests")
+                return "withdrawn_by_requester"
+            elif user_name == taker:
+                sh.update_cell(i, 6, "")
+                sh.update_cell(i, 7, "尋找中")
+                invalidate_cache("sub_requests")
+                return "released_by_taker"
+                
+    return "failed"
 
 # ─────────────────────────────────────────────
 # ❺  核心業務邏輯：追蹤最終負責人 (支援複數人員)
@@ -250,3 +300,48 @@ def is_user_responsible_for_slot(date_str: str, time_slot: str, user_name: str) 
         if o["current"] == user_name and not o["seeking_sub"]:
             return True
     return False
+
+def archive_old_sub_requests():
+    """
+    每天執行的一次：將日期早於今天的代班請求從 Active 搬移到 History 分頁。
+    """
+    now_taipei = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
+    today_str = now_taipei.strftime("%Y-%m-%d")
+    
+    # 取得原始工作表
+    sh_active = _get_sheet("sub_requests")
+    spreadsheet = get_client().open_by_key(SHEET_IDS["sub_requests"])
+    
+    # 確保 History 分頁存在
+    try:
+        sh_history = spreadsheet.worksheet("History")
+    except gspread.exceptions.WorksheetNotFound:
+        # 若不存在則建立，並加上 Header
+        sh_history = spreadsheet.add_worksheet(title="History", rows=1000, cols=10)
+        _ensure_headers(sh_history, SUBS_HEADERS)
+    
+    records = sh_active.get_all_records()
+    to_archive = []
+    rows_to_delete = []
+    
+    for i, r in enumerate(records, start=2):
+        # 如果日期早於今天
+        if str(r.get("date")).strip() < today_str:
+            # 依照 SUBS_HEADERS 的順序提取資料
+            row_data = [r.get(h, "") for h in SUBS_HEADERS]
+            to_archive.append(row_data)
+            rows_to_delete.append(i)
+            
+    if to_archive:
+        # 1. 批次寫入 History
+        sh_history.append_rows(to_archive)
+        
+        # 2. 從 Active 刪除 (必須由下而上刪除，以免 index 跑掉)
+        for row_idx in reversed(rows_to_delete):
+            sh_active.delete_rows(row_idx)
+            
+        # 3. 清除快取
+        invalidate_cache("sub_requests")
+        return len(to_archive)
+    
+    return 0

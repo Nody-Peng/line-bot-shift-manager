@@ -27,7 +27,7 @@
 </head>
 
 <body class="p-6 flex flex-col items-center justify-center min-h-screen">
-    <div class="w-full max-w-md bg-white p-8 border border-slate-200">
+    <div id="mainContent" class="w-full max-w-md bg-white p-8 border border-slate-200">
         <header class="mb-8 border-b border-slate-100 pb-4">
             <h1 class="text-xl font-semibold text-slate-800">找代班申請</h1>
             <p class="text-slate-500 text-sm mt-1">請填寫詳細資訊，系統將自動推播通知</p>
@@ -37,8 +37,10 @@
             <!-- 日期選擇 -->
             <div>
                 <label class="block text-sm font-medium text-slate-700 mb-2">請假日期</label>
-                <input type="date" id="date" required
-                    class="w-full px-4 py-3 border border-slate-200 input-style text-slate-700">
+                <div class="w-full">
+                    <input type="date" id="date" required
+                        class="w-full px-4 py-3 border border-slate-200 input-style text-slate-700 appearance-none bg-white rounded-none">
+                </div>
             </div>
 
             <!-- 時段選擇 (複選) -->
@@ -87,15 +89,130 @@
         </form>
     </div>
 
+    <!-- 分享模式 Loading Overlay -->
+    <div id="shareOverlay" class="hidden flex flex-col items-center justify-center space-y-4">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-slate-600"></div>
+        <p class="text-slate-600 font-medium">正在啟動分享視窗...</p>
+    </div>
+
     <script>
         async function initLIFF() {
             try {
                 await liff.init({ liffId: "{{ liff_id }}" });
                 if (!liff.isLoggedIn()) {
                     liff.login();
+                    return;
+                }
+
+                // 檢查 URL 參數
+                const urlParams = new URLSearchParams(window.location.search);
+                const action = urlParams.get('action');
+                const requestId = urlParams.get('request_id');
+
+                if (action === 'share' && requestId) {
+                    handleShareMode(requestId);
+                } else {
+                    // 初始設定：限制只能選今天以後
+                    const today = new Date().toISOString().split('T')[0];
+                    const dateInput = document.getElementById('date');
+                    dateInput.setAttribute('min', today);
+                    
+                    dateInput.addEventListener('change', updateAvailableShifts);
                 }
             } catch (err) {
                 console.error("LIFF Init failed", err);
+            }
+        }
+
+        async function updateAvailableShifts() {
+            const dateInput = document.getElementById('date');
+            const selectedDate = dateInput.value;
+            const profile = await liff.getProfile();
+            const userId = profile.userId;
+
+            // 顯示載入狀態
+            const labels = document.querySelectorAll('input[name="time_slot"]');
+            labels.forEach(input => {
+                const div = input.nextElementSibling;
+                div.classList.add('opacity-30');
+                input.disabled = true;
+                input.checked = false;
+            });
+
+            try {
+                const res = await fetch(`/api/get-my-shifts?date=${selectedDate}&userId=${userId}`);
+                const data = await res.json();
+                
+                const myShifts = data.shifts || [];
+                
+                labels.forEach(input => {
+                    const div = input.nextElementSibling;
+                    const isMine = myShifts.includes(input.value);
+                    
+                    if (isMine) {
+                        div.classList.remove('opacity-30');
+                        div.classList.add('border-green-500', 'text-green-700');
+                        input.disabled = false;
+                    } else {
+                        div.classList.add('opacity-30');
+                        div.classList.remove('border-green-500', 'text-green-700');
+                        input.disabled = true;
+                    }
+                });
+
+                if (myShifts.length === 0) {
+                    alert("系統提示：您在該日期似乎沒有排班，或該日的班表尚未發布。");
+                }
+            } catch (err) {
+                console.error("Fetch shifts error:", err);
+            }
+        }
+
+        async function handleShareMode(requestId) {
+            document.getElementById('mainContent').classList.add('hidden');
+            document.getElementById('shareOverlay').classList.remove('hidden');
+
+            try {
+                const response = await fetch(`/api/get-sub-flex/${requestId}`);
+                if (!response.ok) throw new Error("無法取得代班資訊");
+                
+                const result = await response.json();
+                await shareMessages(result.flex_contents);
+            } catch (err) {
+                console.error("Share mode error:", err);
+                alert("啟動分享失敗：" + err.message);
+                liff.closeWindow();
+            }
+        }
+
+        async function shareMessages(flexContents) {
+            if (!liff.isApiAvailable('shareTargetPicker')) {
+                alert("目前環境不支援分享功能，或權限未開啟。請確認 LINE Console 已開啟 shareTargetPicker。");
+                liff.closeWindow();
+                return;
+            }
+
+            try {
+                const messages = flexContents.map(contents => ({
+                    type: "flex",
+                    altText: "代班請求",
+                    contents: contents
+                }));
+
+                const res = await liff.shareTargetPicker(messages);
+                if (res) {
+                    // 分享成功，顯示短暫提示後關閉
+                    setTimeout(() => {
+                        liff.closeWindow();
+                    }, 500);
+                } else {
+                    // 使用者取消分享
+                    liff.closeWindow();
+                }
+            } catch (err) {
+                console.error("Share failed", err);
+                alert("分享時發生錯誤，請稍後再試。");
+                liff.closeWindow();
             }
         }
 
@@ -133,13 +250,15 @@
                 });
 
                 if (response.ok) {
-                    liff.closeWindow();
+                    const result = await response.json();
+                    await shareMessages(result.flex_contents);
                 } else {
                     const errData = await response.json();
                     throw new Error(errData.detail || '伺服器處理失敗');
                 }
             } catch (err) {
-                alert("送出失敗：" + err.message);
+                console.error("Submit error:", err);
+                alert("發生錯誤：" + err.message);
                 submitBtn.disabled = false;
                 submitBtn.textContent = '確認發送';
             }

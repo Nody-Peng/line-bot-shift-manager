@@ -14,6 +14,8 @@ from io import StringIO
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
 
 # Google Sheets 整合
 import sheets
@@ -34,6 +36,10 @@ line_bot_api = LineBotApi(os.getenv('LINE_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET'))
 
 LIFF_ID = os.getenv('LINE_LIFF_ID', 'YOUR_LIFF_ID')
+DEFAULT_GROUP_ID = os.getenv('LINE_GROUP_ID')
+
+timezone = pytz.timezone('Asia/Taipei')
+scheduler = BackgroundScheduler(timezone=timezone)
 
 # ─────────────────────────────────────────────
 # Web Routes
@@ -94,16 +100,16 @@ async def upload_csv(
 
 @app.post("/api/submit-sub")
 async def api_submit_sub(data: SubSubmitData):
-    # 1. 時間檢核：不能申請過去的班
-    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    # 1. 時間檢核：確認是否為台北時區的今天
+    today_dt = datetime.datetime.now(timezone)
+    today_str = today_dt.strftime("%Y-%m-%d")
+    
     if data.date < today_str:
-        print(f"DEBUG: Date check failed. Request date: {data.date}, Today: {today_str}")
-        raise HTTPException(status_code=400, detail="無法申請過去的代班。")
+        raise HTTPException(status_code=400, detail="系統提示：無法申請過去日期的代班。")
 
     # 2. 確認使用者已綁定
     user = sheets.get_user(data.userId)
     if not user:
-        print(f"DEBUG: User search failed for ID: {data.userId}")
         raise HTTPException(status_code=400, detail="請先在對話框輸入「綁定 您的姓名」。")
 
     user_name = str(user["name"]).strip()
@@ -112,6 +118,21 @@ async def api_submit_sub(data: SubSubmitData):
 
     # 3. 處理每一個申請的時段
     for slot in data.time_slots:
+        # 如果日期是今天，檢查時段是否已開始 (簡單解析第一個時間點)
+        # 例如 "09:00 - 12:00" 取 "09:00"
+        if data.date == today_str:
+            try:
+                start_time_str = slot.split("-")[0].strip()
+                # 結合日期與起始時間，並設為台北時區
+                start_time_naive = datetime.datetime.strptime(f"{data.date} {start_time_str}", "%Y-%m-%d %H:%M")
+                start_time = timezone.localize(start_time_naive)
+                
+                if today_dt > start_time:
+                    errors.append(f"{slot}: 此時段已開始或已結束，無法申請。")
+                    continue
+            except:
+                pass
+
         # 身分檢核 (使用新的多人支援邏輯)
         if not sheets.is_user_responsible_for_slot(data.date, slot, user_name):
             print(f"DEBUG: User {user_name} not responsible for {data.date} {slot}")
@@ -126,17 +147,123 @@ async def api_submit_sub(data: SubSubmitData):
     if not success_requests:
         raise HTTPException(status_code=400, detail="\n".join(errors) or "申請處理失敗")
 
-    # 5. 推播到群組或個人
+    # 5. 推播與回傳分享資訊
     target_id = data.groupId or data.userId
+    flex_messages = []
     try:
-        # 批次發送 (每個時段一張卡)
         for req in success_requests:
-            flex = create_sos_card(req, user_name)
-            line_bot_api.push_message(target_id, flex)
+            # 發送給申請人 (含取消按鈕)
+            flex = create_sos_card(req, user_name, show_cancel=True)
+            flex_messages.append(flex.contents)
+            line_bot_api.push_message(data.userId, flex)
+            
+            # 若是在群組中，也發送一份到群組 (不含取消按鈕以防別人點錯)
+            if data.groupId:
+                group_flex = create_sos_card(req, user_name, show_cancel=False)
+                line_bot_api.push_message(data.groupId, group_flex)
+
     except Exception as e:
         print(f"Push error: {e}")
 
-    return {"status": "success", "count": len(success_requests)}
+    return {"status": "success", "count": len(success_requests), "flex_contents": flex_messages}
+    
+
+@app.get("/api/get-sub-flex/{req_id}")
+async def api_get_sub_flex(req_id: int):
+    req = sheets.get_sub_request_by_id(req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="找不到該代班請求")
+    
+    # 這裡只回傳不含取消按鈕的卡片，供分享使用
+    flex = create_sos_card(req, str(req["requester_name"]), show_cancel=False)
+    return {"flex_contents": [flex.contents]}
+
+@app.get("/api/get-my-shifts")
+async def api_get_my_shifts(date: str, userId: str):
+    user = sheets.get_user(userId)
+    if not user:
+        return {"shifts": []}
+    
+    user_name = str(user["name"]).strip()
+    
+    # 獲取該日期所有時段的負責人資訊
+    # 先抓取當天所有代班紀錄以利優化
+    all_day_subs = sheets.get_all_sub_requests_for_date(date)
+    
+    plan = sheets.find_active_plan(date)
+    if not plan:
+        return {"shifts": []}
+    
+    dt_obj = datetime.datetime.strptime(date, "%Y-%m-%d")
+    weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    weekday_str = weekday_names[dt_obj.weekday()]
+    slots = sheets.get_slots(int(plan["id"]), weekday_str)
+    
+    my_slots = []
+    unique_slots = sorted(list(set(str(s["time_slot"]).strip() for s in slots)))
+    
+    for s_name in unique_slots:
+        owners = sheets.get_slot_owners_info(date, s_name, cached_subs=all_day_subs)
+        # 檢查該人員是否為目前的負責人且「不在徵代班中」
+        for o in owners:
+            if o["current"] == user_name and not o["seeking_sub"]:
+                my_slots.append(s_name)
+    
+    return {"shifts": my_slots}
+
+
+# ─────────────────────────────────────────────
+# 自動化排程：前一晚提醒
+# ─────────────────────────────────────────────
+
+def nightly_broadcast_task():
+    """每天 20:00 執行，通知隔天的代班異動。"""
+    # ── 1. 資料清理：先將過去的資料封存到 History 分頁 ──
+    try:
+        archive_count = sheets.archive_old_sub_requests()
+        if archive_count > 0:
+            print(f"[Scheduler] 已封存 {archive_count} 筆過期資料。")
+    except Exception as e:
+        print(f"[Scheduler] 資料封存失敗: {e}")
+
+    # ── 2. 發送提醒 ──
+    tomorrow_dt = datetime.datetime.now(timezone) + datetime.timedelta(days=1)
+    tomorrow = tomorrow_dt.strftime("%Y-%m-%d")
+    
+    # 取得隔天的所有代班請求
+    all_subs = sheets.get_all_sub_requests_for_date(tomorrow)
+    if not all_subs:
+        return
+
+    # 分類：已結案 (有人接) 與 尋找中 (沒人接)
+    matched = [s for s in all_subs if str(s.get("status")).strip() == "已結案"]
+    seeking = [s for s in all_subs if str(s.get("status")).strip() == "尋找中"]
+
+    if not matched and not seeking:
+        return
+
+    # 生成提醒圖卡
+    flex = create_reminder_flex(tomorrow, matched, seeking)
+    
+    # 找出發送目標 (優先使用最新的 groupId)
+    target_id = DEFAULT_GROUP_ID
+    if not target_id and all_subs:
+        # 這裡我們無法直接從試算表得知 groupId (因為試算表沒存)，
+        # 通常建議在 .env 設定固定群組 ID，或在申請時寫入一個專門存 groupId 的地方。
+        # 暫時假設管理員已設定 DEFAULT_GROUP_ID。
+        pass
+
+    if target_id:
+        try:
+            line_bot_api.push_message(target_id, flex)
+        except Exception as e:
+            print(f"Broadcast error: {e}")
+
+@app.on_event("startup")
+def start_scheduler():
+    scheduler.add_job(nightly_broadcast_task, 'cron', hour=20, minute=0)
+    scheduler.start()
+    print("Scheduler started.")
 
 
 # ─────────────────────────────────────────────
@@ -182,26 +309,53 @@ def handle_join(event):
 def handle_message(event):
     msg = event.message.text.strip()
     user_id = event.source.user_id
+    user = sheets.get_user(user_id)
 
     try:
-        # ── 1. 綁定身分 ──────────────────────────────
+        # ── 1. 綁定身分 (不受限制) ──────────────────────
         if msg.startswith("綁定 "):
             name = msg.split(" ", 1)[1].strip()
-            action = sheets.upsert_user(user_id, name)
-            reply = f"系統提示：{'更新' if action == 'updated' else '新建'}綁定成功 ({name})"
+            res = sheets.bind_whitelist_user(user_id, name)
+            
+            if res == "success":
+                reply = f"系統提示：綁定成功！您現在是「{name}」。"
+            elif res == "already_bound_to_you":
+                reply = f"系統提示：您已經綁定為「{name}」了。"
+            elif res == "bound_to_other":
+                reply = f"系統提示：此姓名已被其他人綁定，請聯繫管理員。"
+            elif res == "not_in_whitelist":
+                reply = "系統提示：非管理名單內的人員，請洽負責人。"
+            else:
+                reply = "系統提示：綁定失敗，請稍後再試。"
+                
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+            return
 
-        # ── 1b. 說明書 / 幫助 ──────────────────────────
+        # ── 2. 幫助訊息 (不受限制) ──────────────────────
         elif msg in ["說明書", "幫助", "指令", "使用說明", "help", "Help", "?"]:
             flex = create_help_flex()
             line_bot_api.reply_message(event.reply_token, flex)
+            return
 
-        # ── 2. 找代班 ────────────────────────────────
+        # ── 3. 權限檢查 (其餘指令需先綁定) ────────────────
+        # 定義需要權限的指令
+        authorized_commands = ["找代班", "查班表", "查詢", "查代班", "我是誰"]
+        is_cmd = any(msg.startswith(c) for c in authorized_commands)
+
+        if is_cmd and not user:
+            reply = "系統提示：您尚未完成身分綁定，目前無法使用此系統。\n\n請輸入「綁定 您的姓名」來開始使用。"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+            return
+
+        user_name = str(user["name"]).strip()
+
+        # ── 4. 我是誰 ──────────────────────────────
+        if msg == "我是誰":
+            reply = f"【身分資訊】\n綁定姓名：{user_name}\nLINE ID：{user_id}"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+        # ── 5. 找代班 ────────────────────────────────
         elif msg == "找代班":
-            user = sheets.get_user(user_id)
-            if not user:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="系統提示：請先綁定身分。"))
-                return
             liff_url = f"https://liff.line.me/{LIFF_ID}"
             flex = FlexSendMessage(
                 alt_text="開啟代班申請",
@@ -226,9 +380,15 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, flex)
 
         # ── 3. 查詢 ──────────────────────────────────
-        elif msg.startswith("查詢"):
+        elif msg.startswith("查詢") or msg == "查班表":
             parts = msg.split(" ", 1)
-            query_target = parts[1].strip() if len(parts) > 1 else "今天"
+            query_target = parts[1].strip() if len(parts) > 1 else None
+
+            # 如果只有「查詢」二字，彈出日期選擇器
+            if not query_target:
+                flex = create_query_picker_flex()
+                line_bot_api.reply_message(event.reply_token, flex)
+                return
 
             today = datetime.datetime.now()
             today_str = today.strftime("%Y-%m-%d")
@@ -303,10 +463,37 @@ def handle_message(event):
                 flex = create_daily_flex(target_date_str, weekday_str, grouped_results)
                 line_bot_api.reply_message(event.reply_token, flex)
 
-        # ── 4. 預設幫助訊息 ──────────────────────────
-        else:
-            flex = create_help_flex()
+        # ── 4. 代班大廳 (查代班) ───────────────────────
+        elif msg == "查代班":
+            active_reqs = sheets.get_all_active_sub_requests()
+            if not active_reqs:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="系統提示：目前沒有待接手的代班需求。"))
+                return
+            
+            # 依日期排序
+            active_reqs.sort(key=lambda x: x['date'])
+            flex = create_market_carousel(active_reqs)
             line_bot_api.reply_message(event.reply_token, flex)
+
+        # ── 5. 主選單 ────────────────────────────────
+        elif msg == "主選單":
+            flex = create_main_menu_flex()
+            line_bot_api.reply_message(event.reply_token, flex)
+
+        # ── 6. 查詢群組 ID (方便設定通知) ──────────────
+        elif msg == "群組ID":
+            gid = getattr(event.source, "group_id", None) or getattr(event.source, "room_id", None)
+            if gid:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"此群組的 ID 為：\n{gid}\n\n請將此 ID 複製並填入 .env 的 LINE_GROUP_ID 中。"))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這是一對一聊天，無法獲取群組 ID。請在群組中輸入此指令。"))
+
+        # ── 7. 預設回覆 ──────────────────────────────
+        else:
+            # 私訊時自動跳出主選單；群組中則保持安靜以免干擾。
+            if event.source.type == "user":
+                flex = create_main_menu_flex()
+                line_bot_api.reply_message(event.reply_token, flex)
 
     except Exception as e:
         print(f"handle_message Error: {e}")
@@ -385,14 +572,26 @@ def handle_postback(event):
         data_dict = dict(item.split("=") for item in postback_data.split("&"))
         action = data_dict.get("action")
 
+        # ── 查詢日期（來自 datetimepicker）──
+        if action == "query_by_date":
+            selected_date = event.postback.params.get("date")
+            if selected_date:
+                # 建立一個 Mock Event 來觸發查詢邏輯
+                class MockMessage: text = f"查詢 {selected_date}"
+                class MockEvent:
+                    message = MockMessage()
+                    reply_token = event.reply_token
+                    source = event.source
+                return handle_message(MockEvent())
+
         # ── 接手代班（第一步：確認彈窗）──
         if action == "accept_sub":
             req_id = int(data_dict.get("request_id"))
             req = sheets.get_sub_request_by_id(req_id)
 
-            if not req or str(req.get("status", "")).strip() == "已結案":
+            if not req or str(req.get("status", "")).strip() in ["已結案", "已撤回"]:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="狀態通知：此代班請求已結束或不存在。"))
+                    text="狀態通知：此代班請求已結束或已撤回。"))
                 return
 
             confirm_template = ConfirmTemplate(
@@ -402,7 +601,7 @@ def handle_postback(event):
                       f"申請人：{req['requester_name']}"),
                 actions=[
                     PostbackAction(label="確認接手", data=f"action=confirm_accept_sub&request_id={req_id}"),
-                    PostbackAction(label="取消操作", data="action=cancel_sub")
+                    PostbackAction(label="取消操作", data="action=cancel_sub_op")
                 ]
             )
             line_bot_api.reply_message(event.reply_token,
@@ -421,9 +620,9 @@ def handle_postback(event):
             user_name = str(user["name"]).strip()
             req = sheets.get_sub_request_by_id(req_id)
 
-            if not req or str(req.get("status", "")).strip() == "已結案":
+            if not req or str(req.get("status", "")).strip() in ["已結案", "已撤回"]:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="處理失敗：任務可能已由他人接手或失效。"))
+                    text="處理失敗：任務可能已由他人接手、失效或已撤回。"))
                 return
 
             # 不能接手自己的
@@ -432,7 +631,7 @@ def handle_postback(event):
                     text="系統提示：您無法接手自己的代班請求。"))
                 return
 
-            # ★ 防止同時段已有排班的人來接手（新增驗證）
+            # ★ 防止同時段已有排班的人來接手
             plan = sheets.find_active_plan(str(req["date"]))
             if plan:
                 dt_obj = datetime.datetime.strptime(str(req["date"]), "%Y-%m-%d")
@@ -449,38 +648,65 @@ def handle_postback(event):
             # 結案
             success = sheets.close_sub_request(req_id, user_name)
             if not success:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="處理失敗：請稍後再試。"))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="處理失敗：請稍後再試。"))
                 return
 
-            success_flex = FlexSendMessage(
-                alt_text="代班媒合成功",
-                contents={
-                    "type": "bubble", "size": "mega",
-                    "header": {
-                        "type": "box", "layout": "vertical", "backgroundColor": "#F8FAFC", "paddingAll": "15px",
-                        "contents": [
-                            {"type": "text", "text": "STATUS", "color": "#94A3B8", "size": "xs", "weight": "bold"},
-                            {"type": "text", "text": "媒合成功", "color": "#334155", "size": "md", "weight": "bold"}
-                        ]
-                    },
-                    "body": {
-                        "type": "box", "layout": "vertical", "paddingAll": "15px", "spacing": "sm",
-                        "contents": [
-                            {"type": "text", "text": f"日期：{req['date']} ({req['time_slot']})", "size": "sm", "color": "#64748B"},
-                            {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
-                                {"type": "text", "text": str(req["requester_name"]), "color": "#94A3B8", "weight": "bold", "align": "center", "size": "sm"},
-                                {"type": "text", "text": "➔", "align": "center", "color": "#CBD5E1", "size": "sm"},
-                                {"type": "text", "text": user_name, "color": "#475569", "weight": "bold", "align": "center", "size": "sm"}
-                            ]},
-                            {"type": "text", "text": "系統已自動登錄此變動", "margin": "lg", "size": "xs", "color": "#94A3B8", "align": "center"}
-                        ]
-                    }
-                }
-            )
+            # 1. 回傳給接手者 (點擊按鈕的人)
+            success_flex = create_matching_success_flex(req, user_name, is_for_requester=False)
             line_bot_api.reply_message(event.reply_token, success_flex)
+            
+            # 2. 推播給申請人 (另一方)
+            requester_id = sheets.get_user_id_by_name(str(req["requester_name"]))
+            if requester_id:
+                try:
+                    req_success_flex = create_matching_success_flex(req, user_name, is_for_requester=True)
+                    line_bot_api.push_message(requester_id, req_success_flex)
+                except Exception as e:
+                    print(f"Notify requester error: {e}")
+            
+            # 同步發送到群組
+            if DEFAULT_GROUP_ID:
+                try:
+                    group_msg = f"代班媒合成功通知\n\n日期：{req['date']}\n時段：{req['time_slot']}\n原負責人：{req['requester_name']}\n代班人：{user_name}\n事由：{req.get('reason', '無')}"
+                    line_bot_api.push_message(DEFAULT_GROUP_ID, TextSendMessage(text=group_msg))
+                except Exception as e:
+                    print(f"Group notify error: {e}")
 
-        elif action == "cancel_sub":
+        # ── 取消代班請求 (流程啟動) ──
+        elif action == "cancel_sub_req_start":
+            req_id = int(data_dict.get("request_id"))
+            confirm_flex = create_cancellation_confirm_flex(req_id)
+            line_bot_api.reply_message(event.reply_token, confirm_flex)
+
+        # ── 取消代班請求 (執行處) ──
+        elif action == "confirm_cancel_sub_req":
+            req_id = int(data_dict.get("request_id"))
+            user = sheets.get_user(user_id)
+            if not user: return
+            
+            user_name = str(user["name"]).strip()
+            res = sheets.cancel_sub_request_by_id(req_id, user_name)
+            
+            if res == "withdrawn_by_requester":
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已成功撤回代班請求，該時段已移出代班市場。"))
+                # 若已有接手者，通知接手者被放鳥了
+                if req.get("sub_user_name"):
+                    tid = sheets.get_user_id_by_name(str(req["sub_user_name"]))
+                    if tid:
+                        msg = f"通知：{user_name} 已撤回了 {req['date']} {req['time_slot']} 的代班請求，您原定的代班已取消。"
+                        line_bot_api.push_message(tid, TextSendMessage(text=msg))
+                        
+            elif res == "released_by_taker":
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已取消接手，該時段已重新放回代班市場。"))
+                # 通知原申請人，代班人跑了
+                rid = sheets.get_user_id_by_name(str(req["requester_name"]))
+                if rid:
+                    msg = f"通知：{user_name} 已取消了對您 {req['date']} {req['time_slot']} 的代班與接手。該時段已重新回到待領取狀態。"
+                    line_bot_api.push_message(rid, TextSendMessage(text=msg))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="取消失敗，可能該請求已發生變動。"))
+
+        elif action == "cancel_sub_op":
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已取消操作。"))
 
     except Exception as e:
@@ -491,7 +717,25 @@ def handle_postback(event):
 # Flex Message 模板
 # ─────────────────────────────────────────────
 
-def create_sos_card(req: dict, name: str) -> FlexSendMessage:
+def create_sos_card(req: dict, name: str, show_cancel: bool = False) -> FlexSendMessage:
+    footer_contents = []
+    if show_cancel:
+        footer_contents.append({
+            "type": "button", "style": "secondary", "color": "#F1F5F9", "height": "sm",
+            "action": {"type": "postback", "label": "撤回此申請", "data": f"action=cancel_sub_req_start&request_id={req['id']}"}
+        })
+    else:
+        footer_contents.append({
+            "type": "button", "style": "primary", "color": "#64748B", "height": "sm",
+            "action": {"type": "postback", "label": "確認接手", "data": f"action=accept_sub&request_id={req['id']}"}
+        })
+    
+    # 無論是否為申請人，都增加一個分享按鈕（作為 shareTargetPicker 失效時的備案）
+    footer_contents.append({
+        "type": "button", "style": "link", "color": "#94A3B8", "height": "sm", "margin": "sm",
+        "action": {"type": "uri", "label": "分享至群組", "uri": f"https://liff.line.me/{LIFF_ID}?action=share&request_id={req['id']}"}
+    })
+
     return FlexSendMessage(
         alt_text="代班請求",
         contents={
@@ -527,10 +771,7 @@ def create_sos_card(req: dict, name: str) -> FlexSendMessage:
             },
             "footer": {
                 "type": "box", "layout": "vertical", "paddingAll": "10px",
-                "contents": [
-                    {"type": "button", "style": "primary", "color": "#64748B", "height": "sm",
-                     "action": {"type": "postback", "label": "確認接手", "data": f"action=accept_sub&request_id={req['id']}"}}
-                ]
+                "contents": footer_contents
             }
         }
     )
@@ -545,7 +786,7 @@ def create_daily_flex(date_str: str, weekday_str: str, grouped_results: dict) ->
             status_color = "#334155"
             
             if o.get("seeking_sub"):
-                status_text = f"{o['current']} (待校辦)"
+                status_text = f"{o['current']} (徵代班)"
                 status_color = "#94A3B8"
             elif o["current"] != o["original"]:
                 status_text = f"{o['original']}➔{o['current']}"
@@ -610,5 +851,217 @@ def create_weekday_flex(plan_name: str, weekday_str: str, slots: list) -> FlexSe
                 ]
             },
             "body": {"type": "box", "layout": "vertical", "paddingAll": "15px", "contents": rows}
+        }
+    )
+
+def create_main_menu_flex() -> FlexSendMessage:
+    return FlexSendMessage(
+        alt_text="主選單",
+        contents={
+            "type": "bubble",
+            "header": {
+                "type": "box", "layout": "vertical", "backgroundColor": "#F8FAFC", "paddingAll": "20px",
+                "contents": [
+                    {"type": "text", "text": "MAIN MENU", "color": "#94A3B8", "size": "xs", "weight": "bold"},
+                    {"type": "text", "text": "代班小幫手", "color": "#334155", "size": "xl", "weight": "bold", "margin": "sm"}
+                ]
+            },
+            "body": {
+                "type": "box", "layout": "vertical", "paddingAll": "20px", "spacing": "md",
+                "contents": [
+                    {"type": "button", "style": "primary", "color": "#64748B", "height": "sm",
+                     "action": {"type": "message", "label": "查班表", "text": "查詢"}},
+                    {"type": "button", "style": "primary", "color": "#64748B", "height": "sm", "margin": "md",
+                     "action": {"type": "message", "label": "找代班", "text": "找代班"}},
+                    {"type": "button", "style": "primary", "color": "#64748B", "height": "sm", "margin": "md",
+                     "action": {"type": "message", "label": "查代班", "text": "查代班"}}
+                ]
+            },
+            "footer": {
+                "type": "box", "layout": "vertical", "paddingAll": "10px",
+                "contents": [
+                    {"type": "text", "text": "點擊上方按鈕執行功能", "size": "xs", "color": "#CBD5E1", "align": "center"}
+                ]
+            }
+        }
+    )
+
+def create_market_carousel(reqs: list) -> FlexSendMessage:
+    bubbles = []
+    # 排序：日期、時段
+    reqs.sort(key=lambda x: (str(x.get("date", "")), str(x.get("time_slot", ""))))
+    
+    # 最多前 12 筆 (避免過長)
+    for req in reqs[:12]:
+        status = str(req.get("status", "")).strip()
+        is_matched = (status == "已結案")
+        
+        header_color = "#64748B" if not is_matched else "#94A3B8"
+        status_text = "徵代班" if not is_matched else f"已由 {req.get('sub_user_name')} 接手"
+        status_color = "#FFFFFF" if not is_matched else "#F1F5F9"
+
+        bubbles.append({
+            "type": "bubble", "size": "micro",
+            "header": {
+                "type": "box", "layout": "vertical", "backgroundColor": header_color, "paddingAll": "10px",
+                "contents": [
+                    {"type": "text", "text": str(req["date"]), "color": "#FFFFFF", "size": "sm", "weight": "bold"},
+                    {"type": "text", "text": status_text, "color": status_color, "size": "xxs", "margin": "xs"}
+                ]
+            },
+            "body": {
+                "type": "box", "layout": "vertical", "paddingAll": "10px", "spacing": "xs",
+                "contents": [
+                    {"type": "text", "text": str(req["time_slot"]), "size": "xs", "weight": "bold", "color": "#334155"},
+                    {"type": "text", "text": f"申請人: {req['requester_name']}", "size": "xs", "color": "#64748B"},
+                    {"type": "text", "text": f"原因: {req.get('reason', '無')}", "size": "xs", "color": "#94A3B8", "wrap": True}
+                ]
+            },
+            "footer": {
+                "type": "box", "layout": "vertical", "paddingAll": "5px",
+                "contents": [
+                    {"type": "button", "style": "primary", "color": "#64748B", "height": "sm",
+                     "disabled": is_matched,
+                     "action": {"type": "postback", "label": "接手" if not is_matched else "已結案", 
+                                "data": f"action=accept_sub&request_id={req['id']}"}}
+                ]
+            }
+        })
+    
+    return FlexSendMessage(alt_text="代班大廳", contents={"type": "carousel", "contents": bubbles})
+
+def create_reminder_flex(date_str: str, matched: list, seeking: list) -> FlexSendMessage:
+    contents = [
+        {"type": "text", "text": "SCHEDULE REMINDER", "color": "#94A3B8", "size": "xs", "weight": "bold"},
+        {"type": "text", "text": f"{date_str} 異動通知", "color": "#334155", "size": "md", "weight": "bold", "margin": "sm"},
+        {"type": "separator", "margin": "lg"}
+    ]
+
+    if matched:
+        contents.append({"type": "text", "text": "[已媒合項目]", "weight": "bold", "size": "sm", "margin": "lg", "color": "#475569"})
+        for m in matched:
+            contents.append({
+                "type": "text", "text": f"- {m['time_slot']}: {m['requester_name']} -> {m['sub_user_name']}",
+                "size": "xs", "color": "#64748B", "margin": "xs"
+            })
+
+    if seeking:
+        contents.append({"type": "text", "text": "[尚無人代班]", "weight": "bold", "size": "sm", "margin": "lg", "color": "#991B1B"})
+        for s in seeking:
+            contents.append({
+                "type": "text", "text": f"- {s['time_slot']}: {s['requester_name']} (徵求中)",
+                "size": "xs", "color": "#EF4444", "margin": "xs"
+            })
+
+    return FlexSendMessage(
+        alt_text="明日代班異動提醒",
+        contents={
+            "type": "bubble",
+            "body": {"type": "box", "layout": "vertical", "paddingAll": "20px", "contents": contents}
+        }
+    )
+
+def create_query_picker_flex() -> FlexSendMessage:
+    return FlexSendMessage(
+        alt_text="選擇查詢日期",
+        contents={
+            "type": "bubble", "size": "mega",
+            "header": {
+                "type": "box", "layout": "vertical", "backgroundColor": "#F8FAFC", "paddingAll": "15px",
+                "contents": [
+                    {"type": "text", "text": "SCHEDULE QUERY", "color": "#94A3B8", "size": "xs", "weight": "bold"},
+                    {"type": "text", "text": "請選擇查詢日期", "color": "#334155", "size": "md", "weight": "bold"}
+                ]
+            },
+            "body": {
+                "type": "box", "layout": "vertical", "paddingAll": "15px", "spacing": "sm",
+                "contents": [
+                    {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
+                        {"type": "button", "style": "secondary", "height": "sm", "action": {"type": "message", "label": "今天", "text": "查詢 今天"}},
+                        {"type": "button", "style": "secondary", "height": "sm", "action": {"type": "message", "label": "明天", "text": "查詢 明天"}}
+                    ]},
+                    {"type": "separator", "margin": "md"},
+                    {"type": "text", "text": "快速選擇星期", "size": "xs", "color": "#94A3B8", "margin": "md"},
+                    {"type": "box", "layout": "horizontal", "spacing": "xs", "contents": [
+                        {"type": "button", "action": {"type": "message", "label": "一", "text": "查詢 星期一"}},
+                        {"type": "button", "action": {"type": "message", "label": "二", "text": "查詢 星期二"}},
+                        {"type": "button", "action": {"type": "message", "label": "三", "text": "查詢 星期三"}},
+                        {"type": "button", "action": {"type": "message", "label": "四", "text": "查詢 星期四"}}
+                    ]},
+                    {"type": "box", "layout": "horizontal", "spacing": "xs", "contents": [
+                        {"type": "button", "action": {"type": "message", "label": "五", "text": "查詢 星期五"}},
+                        {"type": "button", "action": {"type": "message", "label": "六", "text": "查詢 星期六"}},
+                        {"type": "button", "action": {"type": "message", "label": "日", "text": "查詢 星期日"}}
+                    ]},
+                    {"type": "separator", "margin": "lg"},
+                    {"type": "text", "text": "選擇特定日期", "size": "xs", "color": "#94A3B8", "margin": "md", "align": "center"},
+                    {"type": "button", "style": "primary", "color": "#64748B", "height": "sm", 
+                     "action": {
+                         "type": "datetimepicker",
+                         "label": "點我開啟日曆",
+                         "data": "action=query_by_date",
+                         "mode": "date"
+                     }}
+                ]
+            }
+        }
+    )
+
+def create_matching_success_flex(req: dict, taker_name: str, is_for_requester: bool) -> FlexSendMessage:
+    title = "代班媒合成功"
+    bg_color = "#F8FAFC"
+    
+    footer_contents = [
+        {"type": "button", "style": "secondary", "color": "#F1F5F9", "height": "sm",
+         "action": {"type": "postback", "label": "取消此代班 (悔棋)", "data": f"action=cancel_sub_req_start&request_id={req['id']}"}}
+    ]
+
+    return FlexSendMessage(
+        alt_text=title,
+        contents={
+            "type": "bubble", "size": "mega",
+            "header": {
+                "type": "box", "layout": "vertical", "backgroundColor": bg_color, "paddingAll": "15px",
+                "contents": [
+                    {"type": "text", "text": "MATCHED", "color": "#94A3B8", "size": "xs", "weight": "bold"},
+                    {"type": "text", "text": title, "color": "#334155", "size": "md", "weight": "bold"}
+                ]
+            },
+            "body": {
+                "type": "box", "layout": "vertical", "paddingAll": "15px", "spacing": "sm",
+                "contents": [
+                    {"type": "text", "text": f"日期：{req['date']} ({req['time_slot']})", "size": "sm", "color": "#64748B"},
+                    {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
+                        {"type": "text", "text": str(req["requester_name"]), "color": "#94A3B8", "weight": "bold", "align": "center", "size": "sm"},
+                        {"type": "text", "text": "->", "align": "center", "color": "#CBD5E1", "size": "sm"},
+                        {"type": "text", "text": taker_name, "color": "#475569", "weight": "bold", "align": "center", "size": "sm"}
+                    ]},
+                    {"type": "text", "text": f"事由：{req.get('reason', '無')}", "size": "xs", "color": "#64748B", "margin": "md", "align": "center"}
+                ]
+            },
+            "footer": {
+                "type": "box", "layout": "vertical", "paddingAll": "10px",
+                "contents": footer_contents
+            }
+        }
+    )
+
+def create_cancellation_confirm_flex(req_id: int) -> FlexSendMessage:
+    return FlexSendMessage(
+        alt_text="確認取消代班",
+        contents={
+            "type": "bubble", "size": "mega",
+            "body": {
+                "type": "box", "layout": "vertical", "paddingAll": "20px", "contents": [
+                    {"type": "text", "text": "確認取消", "weight": "bold", "size": "md", "color": "#334155"},
+                    {"type": "text", "text": "您確定要取消這項代班安排嗎？行為將無法復原。", "size": "sm", "color": "#64748B", "margin": "md", "wrap": True},
+                    {"type": "box", "layout": "horizontal", "margin": "lg", "spacing": "sm", "contents": [
+                        {"type": "button", "style": "primary", "color": "#64748B", "height": "sm",
+                         "action": {"type": "postback", "label": "確定取消", "data": f"action=confirm_cancel_sub_req&request_id={req_id}"}},
+                        {"type": "button", "style": "secondary", "height": "sm",
+                         "action": {"type": "postback", "label": "先不要", "data": "action=cancel_sub_op"}}
+                    ]}
+                ]
+            }
         }
     )
