@@ -308,13 +308,21 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
 
 @handler.add(FollowEvent)
 def handle_follow(event):
-    flex = create_help_flex()
-    line_bot_api.reply_message(event.reply_token, flex)
+    try:
+        flex = create_help_flex()
+        line_bot_api.reply_message(event.reply_token, flex)
+    except Exception as e:
+        if "400" not in str(e):
+            print(f"handle_follow error: {e}")
 
 @handler.add(JoinEvent)
 def handle_join(event):
-    flex = create_help_flex()
-    line_bot_api.reply_message(event.reply_token, flex)
+    try:
+        flex = create_help_flex()
+        line_bot_api.reply_message(event.reply_token, flex)
+    except Exception as e:
+        if "400" not in str(e):
+            print(f"handle_join error: {e}")
 
 
 # ─────────────────────────────────────────────
