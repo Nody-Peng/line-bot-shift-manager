@@ -101,13 +101,11 @@ async def upload_csv(
 
 @app.get("/api/get-notify-targets")
 async def api_get_notify_targets():
-    """회傳所有已綁定的使用者清單 + 群組選項。"""
+    """回傳預設通知群組資訊。"""
     targets = []
     if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
         targets.append({"type": "group", "id": DEFAULT_GROUP_ID, "name": "辦公室群組"})
-    users = sheets.get_all_bound_users()
-    for u in users:
-        targets.append({"type": "user", "id": u["line_user_id"], "name": u["name"]})
+    # 移除個人成員回傳，節省 quota 並簡化使用者選擇
     return {"targets": targets}
 
 
@@ -161,25 +159,23 @@ async def api_submit_sub(data: SubSubmitData):
     if not success_requests:
         raise HTTPException(status_code=400, detail="\n".join(errors) or "申請處理失敗")
 
-    # 5. 推播代班請求給選定的對象
-    flex_messages = []
+    # 5. 推播代班請求
     for req in success_requests:
-        flex_messages.append(create_sos_card(req, user_name, show_cancel=True).contents)
-
-        # 建立目標清單：一定包含申請人本人 (show_cancel=True)
-        push_set = set(data.notify_targets) if data.notify_targets else set()
-        push_set.add(data.userId)  # 申請人必定收到
+        # 建立目標清單：只包含申請人與預設群組 (不主動發給所有個人)
+        push_set = {data.userId}
+        if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
+            push_set.add(DEFAULT_GROUP_ID)
 
         for target_id in push_set:
             try:
-                if target_id == data.userId:
-                    flex = create_sos_card(req, user_name, show_cancel=True)
-                else:
-                    flex = create_sos_card(req, user_name, show_cancel=False)
-                print(f"[Push] Sending to {target_id}")
+                # 只有申請人本人的卡片會有「撤回」按鈕
+                show_cancel = (target_id == data.userId)
+                flex = create_sos_card(req, user_name, show_cancel=show_cancel)
+                
+                print(f"[Push] Sending SOS to {target_id}")
                 line_bot_api.push_message(target_id, flex)
             except Exception as e:
-                print(f"[Push] Failed to send to {target_id}: {e}")
+                print(f"[Push] Failed to send SOS to {target_id}: {e}")
 
     return {"status": "success", "count": len(success_requests), "flex_messages": flex_messages}
     
@@ -736,27 +732,19 @@ def handle_postback(event):
             group_flex = create_match_group_notification_flex(req, user_name)
             
             if event.source.type == "group":
+                # 在群組操作，直接回覆成功訊息 (免費)
                 line_bot_api.reply_message(event.reply_token, group_flex)
-                try:
-                    line_bot_api.push_message(user_id, success_flex)
-                except Exception as e:
-                    print(f"Push to taker error: {e}")
             else:
+                # 在私訊操作，回覆接手人成功訊息 (免費)
                 line_bot_api.reply_message(event.reply_token, success_flex)
+                # 同步通知群組 (Push 1 則)
                 if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
                     try:
                         line_bot_api.push_message(DEFAULT_GROUP_ID, group_flex)
                     except Exception as e:
                         print(f"Group notify error: {e}")
 
-            # 2. 推播給申請人 (純通知，無按鈕)
-            requester_id = sheets.get_user_id_by_name(str(req["requester_name"]))
-            if requester_id:
-                try:
-                    req_success_flex = create_matching_success_flex(req, user_name, role="requester")
-                    line_bot_api.push_message(requester_id, req_success_flex)
-                except Exception as e:
-                    print(f"Notify requester error: {e}")
+            # 移除對原申請人的主動 Push 通知以節省額度 (申請人請看群組或自行查詢)
 
         # ── 申請人撤回 (媒合前) ──
         elif action == "cancel_sub_req_start":
@@ -1237,7 +1225,7 @@ def create_matching_success_flex(req: dict, taker_name: str, role: str = "reques
 
 
 def create_match_group_notification_flex(req: dict, taker_name: str) -> FlexSendMessage:
-    """發送到群組的媒合成功通知卡，無操作按鈕。"""
+    """發送到群組的媒合成功通知卡，含 5 分鐘內撤銷按鈕。"""
     return FlexSendMessage(
         alt_text="代班媒合成功通知",
         contents={
@@ -1266,10 +1254,13 @@ def create_match_group_notification_flex(req: dict, taker_name: str) -> FlexSend
                 ]
             },
             "footer": {
-                "type": "box", "layout": "vertical", "paddingAll": "10px",
+                "type": "box", "layout": "vertical", "paddingAll": "10px", "spacing": "sm",
                 "contents": [
+                    {"type": "button", "style": "secondary", "color": "#F1F5F9", "height": "sm",
+                     "action": {"type": "postback", "label": "撤銷此回覆 (5分鐘內)", 
+                                "data": f"action=cancel_by_taker&request_id={req['id']}"}},
                     {"type": "text", "text": "代班安排已完成，感謝配合！", "size": "xs",
-                     "color": "#94A3B8", "align": "center"}
+                     "color": "#CBD5E1", "align": "center", "margin": "sm"}
                 ]
             }
         }
