@@ -159,25 +159,9 @@ async def api_submit_sub(data: SubSubmitData):
     if not success_requests:
         raise HTTPException(status_code=400, detail="\n".join(errors) or "申請處理失敗")
 
-    # 5. 推播代班請求
-    for req in success_requests:
-        # 建立目標清單：只包含申請人與預設群組 (不主動發給所有個人)
-        push_set = {data.userId}
-        if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
-            push_set.add(DEFAULT_GROUP_ID)
-
-        for target_id in push_set:
-            try:
-                # 只有申請人本人的卡片會有「撤回」按鈕
-                show_cancel = (target_id == data.userId)
-                flex = create_sos_card(req, user_name, show_cancel=show_cancel)
-                
-                print(f"[Push] Sending SOS to {target_id}")
-                line_bot_api.push_message(target_id, flex)
-            except Exception as e:
-                print(f"[Push] Failed to send SOS to {target_id}: {e}")
-
-    return {"status": "success", "count": len(success_requests), "flex_messages": flex_messages}
+    # 正式改為零額度流程後，此 API 不再主動推播。
+    # 僅回報處理成功的筆數。
+    return {"status": "success", "count": len(success_requests)}
     
 
 @app.get("/api/get-sub-flex/{req_id}")
@@ -350,6 +334,58 @@ def handle_message(event):
                 
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
+
+        # ── 1.5 處理 LIFF 發出的代班申請指令 (#申請代班) ──
+        elif msg.startswith("#申請代班"):
+            try:
+                print(f"[Command] Received #申請代班 from {user_id}")
+                # 解析格式：#申請代班\n日期: 2024-05-01\n時段: 09:00 - 12:00, 14:00 - 16:00\n理由: 私事
+                lines = msg.split("\n")
+                req_data = {}
+                for line in lines:
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        req_data[k.strip()] = v.strip()
+                
+                date = req_data.get("日期")
+                slots_str = req_data.get("時段")
+                reason = req_data.get("理由", "無")
+                
+                if not date or not slots_str:
+                    print(f"[Command] Invalid data: date={date}, slots={slots_str}")
+                    return
+
+                if not user:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="系統提示：請先完成身分綁定再申請代班。"))
+                    return
+                
+                user_name = str(user["name"]).strip()
+                time_slots = [s.strip() for s in slots_str.split(",")]
+                print(f"[Command] Processing {len(time_slots)} slots for {user_name}")
+                
+                success_reqs = []
+                for slot in time_slots:
+                    new_req = sheets.add_sub_request(date, slot, user_name, reason)
+                    success_reqs.append(new_req)
+                
+                # 回覆 SOS 卡片 (使用 Carousel 支援多時段)
+                if success_reqs:
+                    bubbles = []
+                    for req in success_reqs:
+                        flex_obj = create_sos_card(req, user_name)
+                        bubbles.append(flex_obj.contents)
+                    
+                    if len(bubbles) == 1:
+                        line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="代班請求", contents=bubbles[0]))
+                    else:
+                        line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="代班請求組合", contents={"type": "carousel", "contents": bubbles[:12]}))
+                    print(f"[Command] Success: Sent {len(bubbles)} cards via Reply")
+                return
+            except Exception as e:
+                print(f"Handle #申請代班 Error: {e}")
+                import traceback
+                traceback.print_exc()
+                return
 
         # ── 2. 指令面板/幫助訊息 (不受限制) ──────────
         elif msg in ["主選單", "菜單", "menu", "Menu"]:
@@ -749,10 +785,22 @@ def handle_postback(event):
         # ── 申請人撤回 (媒合前) ──
         elif action == "cancel_sub_req_start":
             req_id = int(data_dict.get("request_id"))
+            user = sheets.get_user(user_id)
+            if not user:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請先完成身分綁定。"))
+                return
+            
+            user_name = str(user["name"]).strip()
             req = sheets.get_sub_request_by_id(req_id)
             if not req:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到該請求。"))
                 return
+
+            # 安全檢查：限本人撤回
+            if str(req.get("requester_name", "")).strip() != user_name:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="權限提示：只有原申請人可以撤回此代班計畫。"))
+                return
+
             if str(req.get("status", "")).strip() == "已結案":
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
                     text="撤回失敗：此請求已被接手，申請人無法再撤回。\n若希望取消代班，請通知接手人在 5 分鐘內自行取消接手。"))
@@ -779,11 +827,7 @@ def handle_postback(event):
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=group_msg))
                 else:
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已成功撤回代班請求，該時段已移出代班市場。"))
-                    if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
-                        try:
-                            line_bot_api.push_message(DEFAULT_GROUP_ID, TextSendMessage(text=group_msg))
-                        except Exception as e:
-                            print(f"Group notify error: {e}")
+                    # 移除主動 Push 通知以節省額度
             elif res == "already_matched":
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
                     text="撤回失敗：此請求已被他人接手。\n若希望取消代班，請通知接手人在 5 分鐘內自行取消接手。"))
@@ -827,26 +871,9 @@ def handle_postback(event):
                 # 處理回覆與推播邏輯
                 if event.source.type == "group":
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=group_msg))
-                    try:
-                        line_bot_api.push_message(user_id, TextSendMessage(text="已成功取消接手，該時段已重新放回代班市場。"))
-                    except Exception as e:
-                        pass
                 else:
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已成功取消接手，該時段已重新放回代班市場。"))
-                    if DEFAULT_GROUP_ID and str(DEFAULT_GROUP_ID).strip():
-                        try:
-                            line_bot_api.push_message(DEFAULT_GROUP_ID, TextSendMessage(text=group_msg))
-                        except Exception as e:
-                            print(f"Group notify error: {e}")
-
-                # 通知原申請人
-                rid = sheets.get_user_id_by_name(str(req["requester_name"]))
-                if rid:
-                    try:
-                        msg = f"通知：{user_name} 已取消接手您 {req['date']} {req['time_slot']} 的代班。該時段已重新回到待領取狀態。"
-                        line_bot_api.push_message(rid, TextSendMessage(text=msg))
-                    except Exception as e:
-                        print(f"Notify requester error: {e}")
+                    # 移除對群組與原申請人的主動 Push 通知以節省額度
             else:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="取消失敗，請稍後再試。"))
 
@@ -880,17 +907,17 @@ def handle_postback(event):
 # ─────────────────────────────────────────────
 
 def create_sos_card(req: dict, name: str, show_cancel: bool = False) -> FlexSendMessage:
-    footer_contents = []
-    if show_cancel:
-        footer_contents.append({
-            "type": "button", "style": "secondary", "color": "#F1F5F9", "height": "sm",
-            "action": {"type": "postback", "label": "撤回此申請", "data": f"action=cancel_sub_req_start&request_id={req['id']}"}
-        })
-    else:
-        footer_contents.append({
+    """整合版卡片：同時包含[接手]與[撤回]按鈕。"""
+    footer_contents = [
+        {
             "type": "button", "style": "primary", "color": "#64748B", "height": "sm",
             "action": {"type": "postback", "label": "確認接手", "data": f"action=accept_sub&request_id={req['id']}"}
-        })
+        },
+        {
+            "type": "button", "style": "secondary", "color": "#F1F5F9", "height": "sm", "margin": "md",
+            "action": {"type": "postback", "label": "撤回此申請", "data": f"action=cancel_sub_req_start&request_id={req['id']}"}
+        }
+    ]
 
     return FlexSendMessage(
         alt_text="代班請求",
