@@ -79,14 +79,42 @@
                 </div>
             </div>
 
-            <!-- 指南 -->
+            <!-- 指南與下載 -->
             <div class="bg-white border border-slate-200 p-6 mb-8 text-sm text-slate-600">
-                <h2 class="text-slate-800 font-medium mb-3">匯入說明</h2>
-                <ul class="list-disc list-inside space-y-1">
-                    <li>您可以直接點選上方按鈕在 Google Sheets 修改資料。</li>
-                    <li>若要批次新增計畫，請填寫下方表單並上傳 CSV。</li>
-                    <li>CSV 格式：星期,時段,姓名。</li>
-                </ul>
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-slate-800 font-medium text-lg">系統操作說明書</h2>
+                    <a href="/download-template" class="px-4 py-2 bg-slate-100 border border-slate-200 text-slate-700 hover:bg-slate-200 transition-colors font-medium rounded-sm inline-flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                        下載 CSV 範本
+                    </a>
+                </div>
+                <div class="space-y-4">
+                    <div>
+                        <h3 class="font-medium text-slate-700 mb-1">1. 下載並填寫範本</h3>
+                        <ul class="list-disc list-inside space-y-1 pl-2">
+                            <li>點擊上方按鈕下載 <code>template.csv</code>。</li>
+                            <li>請勿更改第一列的標題（星期,時段,姓名）。</li>
+                            <li>「星期」請填入：星期一、星期二...等。</li>
+                            <li>「時段」請填入系統支援的格式（如：09:00 - 12:00, 18:00 - 22:00 等）。</li>
+                            <li>「姓名」請確認與「使用者對照表」中的姓名一致。</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3 class="font-medium text-slate-700 mb-1">2. 填寫計畫資訊並上傳</h3>
+                        <ul class="list-disc list-inside space-y-1 pl-2">
+                            <li><strong>班表計畫名稱</strong>：為這份班表命名（例如：113學年度上學期9月班表）。</li>
+                            <li><strong>開始/結束日期</strong>：設定此班表的生效區間，系統會自動在該區間內套用此班表。</li>
+                            <li>選擇您編輯好的 CSV 檔案，點擊「執行匯入」。</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3 class="font-medium text-slate-700 mb-1">3. 確認與修改</h3>
+                        <ul class="list-disc list-inside space-y-1 pl-2">
+                            <li>匯入成功後，資料會同步至雲端「班表計畫清單」與「班表詳細時段」。</li>
+                            <li>若需微調，可直接點擊上方區塊的按鈕，進入 Google Sheets 手動修改。</li>
+                        </ul>
+                    </div>
+                </div>
             </div>
 
             <!-- 上傳區 -->

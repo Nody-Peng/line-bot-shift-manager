@@ -12,6 +12,7 @@ import datetime
 import csv
 from io import StringIO
 from fastapi.templating import Jinja2Templates
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -59,6 +60,13 @@ async def get_liff_form(request: Request):
 @app.get("/admin")
 async def admin_page(request: Request):
     return templates.TemplateResponse(request=request, name="admin_upload.html")
+
+@app.get("/download-template")
+async def download_template():
+    file_path = os.path.join(os.getcwd(), "template.csv")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Template file not found")
+    return FileResponse(path=file_path, filename="template.csv", media_type="text/csv")
 
 @app.post("/upload-csv")
 async def upload_csv(
