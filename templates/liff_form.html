@@ -46,9 +46,13 @@
             <div>
                 <label class="block text-sm font-medium text-slate-700 mb-2">時段 (可複選)</label>
                 <div class="grid grid-cols-2 gap-3">
-                    <label class="relative">
+                    <label class="relative" id="slot-0900-1200">
                         <input type="checkbox" name="time_slot" value="09:00 - 12:00" class="peer hidden">
                         <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">09:00 - 12:00</div>
+                    </label>
+                    <label class="relative hidden" id="slot-0830-1200">
+                        <input type="checkbox" name="time_slot" value="08:30 - 12:00" class="peer hidden">
+                        <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">08:30 - 12:00</div>
                     </label>
                     <label class="relative">
                         <input type="checkbox" name="time_slot" value="12:00 - 14:00" class="peer hidden">
@@ -122,6 +126,21 @@
 
         async function updateAvailableShifts() {
             const selectedDate = document.getElementById('date').value;
+            
+            if (selectedDate) {
+                const dateObj = new Date(selectedDate);
+                const isSaturday = dateObj.getDay() === 6;
+                const slot0900 = document.getElementById('slot-0900-1200');
+                const slot0830 = document.getElementById('slot-0830-1200');
+                if (isSaturday) {
+                    slot0900.classList.add('hidden');
+                    slot0830.classList.remove('hidden');
+                } else {
+                    slot0900.classList.remove('hidden');
+                    slot0830.classList.add('hidden');
+                }
+            }
+
             const inputs = document.querySelectorAll('input[name="time_slot"]');
             inputs.forEach(input => {
                 input.nextElementSibling.classList.add('opacity-30');
