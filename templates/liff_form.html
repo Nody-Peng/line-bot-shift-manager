@@ -50,10 +50,6 @@
                         <input type="checkbox" name="time_slot" value="09:00 - 12:00" class="peer hidden">
                         <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">09:00 - 12:00</div>
                     </label>
-                    <label class="relative hidden" id="slot-0830-1200">
-                        <input type="checkbox" name="time_slot" value="08:30 - 12:00" class="peer hidden">
-                        <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">08:30 - 12:00</div>
-                    </label>
                     <label class="relative">
                         <input type="checkbox" name="time_slot" value="12:00 - 14:00" class="peer hidden">
                         <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">12:00 - 14:00</div>
@@ -66,9 +62,13 @@
                         <input type="checkbox" name="time_slot" value="16:00 - 18:00" class="peer hidden">
                         <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">16:00 - 18:00</div>
                     </label>
-                    <label class="relative">
+                    <label class="relative hidden col-span-2" id="slot-0830-1200">
+                        <input type="checkbox" name="time_slot" value="08:30 - 12:00" class="peer hidden">
+                        <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">08:30 - 12:00 (早班)</div>
+                    </label>
+                    <label class="relative col-span-2">
                         <input type="checkbox" name="time_slot" value="18:00 - 22:00" class="peer hidden">
-                        <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">18:00 - 22:00</div>
+                        <div class="cursor-pointer text-center py-3 border border-slate-200 peer-checked:border-slate-600 peer-checked:bg-slate-600 peer-checked:text-white transition-all text-sm font-medium text-slate-500">18:00 - 22:00 (晚班)</div>
                     </label>
                     <label class="relative col-span-2">
                         <input type="checkbox" name="time_slot" value="09:00 - 17:00" class="peer hidden">
@@ -130,13 +130,10 @@
             if (selectedDate) {
                 const dateObj = new Date(selectedDate);
                 const isSaturday = dateObj.getDay() === 6;
-                const slot0900 = document.getElementById('slot-0900-1200');
                 const slot0830 = document.getElementById('slot-0830-1200');
                 if (isSaturday) {
-                    slot0900.classList.add('hidden');
                     slot0830.classList.remove('hidden');
                 } else {
-                    slot0900.classList.remove('hidden');
                     slot0830.classList.add('hidden');
                 }
             }
