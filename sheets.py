@@ -202,14 +202,37 @@ def get_all_sub_requests_for_date(date: str) -> list[dict]:
     return [r for r in records if str(r.get("date", "")).strip() == date]
 
 def get_all_active_sub_requests() -> list[dict]:
-    """獲取所有「待接手」以及「已媒合但尚未發生」的代班請求。"""
+    """獲取所有「待接手」以及「已媒合但尚未發生」的代班請求。過濾掉已過期的時段。"""
     records = _get_records_cached("sub_requests", ttl=5)
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    return [
-        r for r in records 
-        if str(r.get("status")).strip() == "尋找中" or
-        (str(r.get("status")).strip() == "已結案" and str(r.get("date")) >= today)
-    ]
+    
+    tz = pytz.timezone('Asia/Taipei')
+    now = datetime.datetime.now(tz)
+    today_str = now.strftime("%Y-%m-%d")
+    
+    active_reqs = []
+    for r in records:
+        status = str(r.get("status", "")).strip()
+        if status not in ["尋找中", "已結案"]:
+            continue
+            
+        req_date_str = str(r.get("date", "")).strip()
+        time_slot_str = str(r.get("time_slot", "")).strip()
+        
+        if req_date_str < today_str:
+            continue
+        elif req_date_str == today_str:
+            try:
+                start_time_str = time_slot_str.split("-")[0].strip()
+                start_dt_naive = datetime.datetime.strptime(f"{req_date_str} {start_time_str}", "%Y-%m-%d %H:%M")
+                start_dt = tz.localize(start_dt_naive)
+                if now > start_dt:
+                    continue
+            except Exception:
+                pass
+                
+        active_reqs.append(r)
+        
+    return active_reqs
 
 def get_sub_request_by_id(req_id: int) -> dict | None:
     records = _get_records_cached("sub_requests", ttl=5)

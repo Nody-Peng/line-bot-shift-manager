@@ -531,8 +531,12 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="系統提示：目前沒有待接手的代班需求。"))
                 return
             
-            # 依日期排序
-            active_reqs.sort(key=lambda x: x['date'])
+            # 依狀態與日期排序：尋找中優先，其次是已結案，然後依日期遞增
+            def sort_key(x):
+                status_weight = 0 if str(x.get("status", "")).strip() == "尋找中" else 1
+                return (status_weight, x.get("date", ""))
+                
+            active_reqs.sort(key=sort_key)
             flex = create_market_carousel(active_reqs)
             line_bot_api.reply_message(event.reply_token, flex)
 
