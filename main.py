@@ -1077,8 +1077,8 @@ def create_main_menu_flex() -> FlexSendMessage:
 
 def create_market_carousel(reqs: list) -> FlexSendMessage:
     bubbles = []
-    # 排序：日期、時段
-    reqs.sort(key=lambda x: (str(x.get("date", "")), str(x.get("time_slot", ""))))
+    # 排序：狀態(尋找中優先)、日期、時段
+    reqs.sort(key=lambda x: (0 if str(x.get("status", "")).strip() == "尋找中" else 1, str(x.get("date", "")), str(x.get("time_slot", ""))))
     
     # 最多前 12 筆 (避免過長)
     for req in reqs[:12]:
